@@ -104,57 +104,36 @@ func (c *DefaultDialerClient) OpenDownload(ctx context.Context, baseURL string) 
 	// logs
 	gotConn := done.New()
 
+	ctx, ctxCancel := context.WithCancel(ctx)
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(connInfo httptrace.GotConnInfo) {
+			remoteAddr = connInfo.Conn.RemoteAddr()
+			localAddr = connInfo.Conn.LocalAddr()
+			gotConn.Close()
+		},
+	})
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", baseURL, nil)
+	req.Header = c.transportConfig.GetRequestHeader()
+
 	var downResponse io.ReadCloser
 	gotDownResponse := done.New()
 
-	ctx, ctxCancel := context.WithCancel(ctx)
-
 	go func() {
-		trace := &httptrace.ClientTrace{
-			GotConn: func(connInfo httptrace.GotConnInfo) {
-				remoteAddr = connInfo.Conn.RemoteAddr()
-				localAddr = connInfo.Conn.LocalAddr()
-				gotConn.Close()
-			},
-		}
-
-		// in case we hit an error, we want to unblock this part
-		defer gotConn.Close()
-
-		ctx = httptrace.WithClientTrace(ctx, trace)
-
-		req, err := http.NewRequestWithContext(
-			ctx,
-			"GET",
-			baseURL,
-			nil,
-		)
-		if err != nil {
-			errors.LogInfoInner(ctx, err, "failed to construct download http request")
-			gotDownResponse.Close()
-			return
-		}
-
-		req.Header = c.transportConfig.GetRequestHeader()
-
+		defer gotDownResponse.Close()
 		response, err := c.client.Do(req)
-		gotConn.Close()
 		if err != nil {
+			gotConn.Close()
 			errors.LogInfoInner(ctx, err, "failed to send download http request")
-			gotDownResponse.Close()
 			return
 		}
-
 		if response.StatusCode != 200 {
 			// c.closed = true
 			response.Body.Close()
 			errors.LogInfo(ctx, "invalid status code on download:", response.Status)
-			gotDownResponse.Close()
 			return
 		}
-
 		downResponse = response.Body
-		gotDownResponse.Close()
 	}()
 
 	<-gotConn.Wait()
